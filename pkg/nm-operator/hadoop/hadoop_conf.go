@@ -102,10 +102,41 @@ func (w writeWrapper) Write(data []byte) (n int, err error) {
 	return
 }
 
-// GetXMLFullPath return full path
+// allowedConfigFiles is the whitelist of config files that can be accessed via the property API.
+// Only these files are permitted; any other filename will be rejected to prevent path traversal.
+var allowedConfigFiles = map[string]struct{}{
+	YarnSiteFile: {},
+	HdfsSiteFILE: {},
+	CoreSiteFile: {},
+}
+
+// GetXMLFullPath returns the full path for a given filename.
+// Deprecated: use SafeGetXMLFullPath for user-supplied filenames to enforce path boundary checks.
 func GetXMLFullPath(filename string) string {
 	confDir := os.Getenv("HADOOP_CONF_DIR")
 	return fmt.Sprintf("%s/%s", confDir, filename)
+}
+
+// SafeGetXMLFullPath validates filename against a whitelist and ensures the resolved
+// absolute path stays within HADOOP_CONF_DIR, preventing path traversal attacks.
+// Returns an error if the filename is not in the whitelist or the resolved path escapes
+// the configuration directory.
+func SafeGetXMLFullPath(filename string) (string, error) {
+	// Step 1: whitelist check — only allow known config file names.
+	if _, ok := allowedConfigFiles[filename]; !ok {
+		return "", fmt.Errorf("unsupported config file %q: not in allowed list", filename)
+	}
+
+	// Step 2: path boundary check — ensure the resolved path stays inside confDir.
+	confDir := os.Getenv("HADOOP_CONF_DIR")
+	base := filepath.Clean(confDir)
+	full := filepath.Join(base, filename)
+	rel, err := filepath.Rel(base, full)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("invalid config path: %q escapes configuration directory", filename)
+	}
+
+	return full, nil
 }
 
 // LoadConfDataFromStream load xml struct from io stream
@@ -184,20 +215,27 @@ func writeConfDataToFile(fileName string, properties map[string]string, change, 
 		return nil
 	}
 
+	// Validate the filename against the whitelist and path boundary before any file operation.
+	fullPath, err := SafeGetXMLFullPath(fileName)
+	if err != nil {
+		klog.Errorf("unsafe config file path(%s): %v", fileName, err)
+		return err
+	}
+
 	conf, err := getConfData(fileName, properties, change, add, del)
 	if err != nil {
 		klog.Errorf("get conf data err: %v", err)
 		return err
 	}
 
-	f, err := getFileInfo(GetXMLFullPath(fileName))
+	f, err := getFileInfo(fullPath)
 	if err != nil {
 		klog.Errorf("get file(%s) info err: %v", fileName, err)
 		return err
 	}
 
 	// write config data to temporary file
-	tmpFile, err := ioutil.TempFile(filepath.Dir(GetXMLFullPath(fileName)), ".")
+	tmpFile, err := ioutil.TempFile(filepath.Dir(fullPath), ".")
 	if err != nil {
 		klog.Errorf("create tmp file err: %v", err)
 		return err
@@ -238,7 +276,7 @@ func writeConfDataToFile(fileName string, properties map[string]string, change, 
 	err = func() error {
 		fileLock.Lock()
 		defer fileLock.Unlock()
-		return os.Rename(tmpFile.Name(), GetXMLFullPath(fileName))
+		return os.Rename(tmpFile.Name(), fullPath)
 	}()
 	if err != nil {
 		klog.Errorf("rename tmp file err: %v", err)
@@ -314,7 +352,9 @@ func getFileInfo(fileName string) (*fileInfo, error) {
 	return f, nil
 }
 
-// LoadConfDataFromFile load xmf struct from file
+// LoadConfDataFromFile load xml struct from file.
+// For user-supplied filenames (e.g. from HTTP requests), the caller must validate
+// the filename via SafeGetXMLFullPath before calling this function.
 func LoadConfDataFromFile(filename string) (*ConfData, error) {
 	fileLock.Lock()
 	defer fileLock.Unlock()
@@ -420,8 +460,14 @@ func SetCapacity(capacity global.NMCapacity) error {
 	return SetMultipleConfDataToFile(YarnSiteFile, properties)
 }
 
-// GetConfig get property based on keys
+// GetConfig get property based on keys.
+// fileName must be a whitelisted config file name; returns error if validation fails.
 func GetConfig(fileName string, keys []string) (map[string]string, error) {
+	// Validate against whitelist and path boundary before reading.
+	if _, err := SafeGetXMLFullPath(fileName); err != nil {
+		return map[string]string{}, err
+	}
+
 	conf, err := LoadConfDataFromFile(fileName)
 	if err != nil {
 		return map[string]string{}, err
@@ -434,8 +480,14 @@ func GetConfig(fileName string, keys []string) (map[string]string, error) {
 	return property, nil
 }
 
-// GetAllConfig get all properties from file
+// GetAllConfig get all properties from file.
+// fileName must be a whitelisted config file name; returns error if validation fails.
 func GetAllConfig(fileName string) (map[string]string, error) {
+	// Validate against whitelist and path boundary before reading.
+	if _, err := SafeGetXMLFullPath(fileName); err != nil {
+		return map[string]string{}, err
+	}
+
 	conf, err := LoadConfDataFromFile(fileName)
 	if err != nil {
 		return map[string]string{}, err
@@ -449,12 +501,14 @@ func GetAllConfig(fileName string) (map[string]string, error) {
 	return property, nil
 }
 
-// SetConfig set properties for file
+// SetConfig set properties for file.
+// fileName must be a whitelisted config file name; returns error if validation fails.
 func SetConfig(fileName string, properties map[string]string) error {
 	return SetMultipleConfDataToFile(fileName, properties)
 }
 
-// SetAddDelConfig set properties for file, may add new or delete old
+// SetAddDelConfig set properties for file, may add new or delete old.
+// fileName must be a whitelisted config file name; returns error if validation fails.
 func SetAddDelConfig(fileName string, properties map[string]string, add, del bool) error {
 	return SetAddDelMultipleConfDataToFile(fileName, properties, add, del)
 }
