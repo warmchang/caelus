@@ -300,6 +300,13 @@ func (n *NMOperator) GetProperty(request *restful.Request, response *restful.Res
 		return
 	}
 
+	// Validate configFile against whitelist and path boundary to prevent path traversal.
+	if _, err := hadoop.SafeGetXMLFullPath(key.ConfigFile); err != nil {
+		klog.Warningf("GetProperty rejected unsafe configFile %q: %v", key.ConfigFile, err)
+		response.WriteServiceError(http.StatusBadRequest, restful.NewError(http.StatusBadRequest, err.Error()))
+		return
+	}
+
 	value := make(map[string]string)
 	if key.ConfigAll {
 		value, err = hadoop.GetAllConfig(key.ConfigFile)
@@ -331,6 +338,14 @@ func (n *NMOperator) SetProperty(request *restful.Request, response *restful.Res
 		response.WriteServiceError(http.StatusBadRequest, restful.NewError(http.StatusBadRequest, err.Error()))
 		return
 	}
+
+	// Validate configFile against whitelist and path boundary to prevent path traversal.
+	if _, err := hadoop.SafeGetXMLFullPath(property.ConfigFile); err != nil {
+		klog.Warningf("SetProperty rejected unsafe configFile %q: %v", property.ConfigFile, err)
+		response.WriteServiceError(http.StatusBadRequest, restful.NewError(http.StatusBadRequest, err.Error()))
+		return
+	}
+
 	klog.Infof("set property request: %+v", property)
 
 	if !property.ConfigAdd && !property.ConfigDel {
